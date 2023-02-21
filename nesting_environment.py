@@ -17,10 +17,12 @@ from shapely.ops import unary_union
 from shapely import affinity
 import rasterio.features
 import math
-random.seed(0)
-np.random.seed(0)
+import uuid
+# random.seed(0)
+# np.random.seed(0)
 # scipy.rand.s
-
+# import tracemalloc
+# tracemalloc.start()
 
 
 class Graph:
@@ -78,16 +80,23 @@ class NestEnvConfig:
         self.border_max_pts = 0
 
         self.min_num_of_polygons_after_merge = 30
-        self.max_num_of_polygons_after_merge = 120
+        self.max_num_of_polygons_after_merge = min(120, self.max_pts)
+
+        self.max_ep_steps = 20
 
         self.poly_dropping_target_efficiency = 0.85
 
         self.poly_shrink_buffer_range = (0.0001, 0.001)
 
-        self.raster_width=1000
-        self.raster_height=1000
+        self.raster_width=200
+        self.raster_height=200
 
-        self.show_state = True
+        self.show_state = False
+        self.save_state = False
+        self.save_dir = "./nesting_states"
+
+        # Overlap Parameters
+        self.move_piece_prob = 0.1
 
 
 class NestingEnvironment:
@@ -98,12 +107,14 @@ class NestingEnvironment:
 
 
     def reset(self):
+        self.current_steps = 0
 
+        if self.cfg.save_state:
+            self.save_dir = os.path.join(self.cfg.save_dir, str(uuid.uuid1()))
+            os.makedirs(self.save_dir, exist_ok=True)
         self.build_state()
-
         self.initial_polys = copy.deepcopy(self.current_polys)
-
-        # self.generate_overlap()
+        self.generate_overlap()
 
         return self.state
 
@@ -133,25 +144,37 @@ class NestingEnvironment:
         return selected_border_pts
 
     def generate_overlap(self):
-        pass
+        move_piece = np.random.random(len(self.current_polys))
+        selected_pieces_to_move = np.where(move_piece < self.cfg.move_piece_prob)
+        resulting_action = np.zeros((len(self.current_polys), 2))
+        resulting_action[selected_pieces_to_move] = \
+                np.stack(
+                    [
+                        np.random.uniform(low=-self.cfg.raster_width, high=self.cfg.raster_width,
+                                          size=resulting_action[selected_pieces_to_move].shape[0]),
+                        np.random.uniform(low=-self.cfg.raster_height, high=self.cfg.raster_height,
+                          size=resulting_action[selected_pieces_to_move].shape[0])
+                    ], axis=-1
+                )
+
+        actions = resulting_action.tolist()
+        self.step(actions)
 
     def step(self, actions):
         bounds = [rasterio.features.bounds(poly) for poly in self.current_polys]
-        # top_right_bounds = [b[2:][::-1] for b in bounds]
-        # lower_left_bounds = [b[:2][::-1] for b in bounds]
 
         normalized_poly_actions = []
 
         for poly_action, (left, bottom, right, top) in zip(actions, bounds):
             poly_delta_x, poly_delta_y = poly_action
 
-            if right + poly_delta_x >= cfg.raster_width:
-                poly_delta_x = cfg.raster_width - right
+            if right + poly_delta_x >= self.cfg.raster_width:
+                poly_delta_x = self.cfg.raster_width - right
             if left + poly_delta_x < 0:
                 poly_delta_x = -left
 
-            if top + poly_delta_y >= cfg.raster_height:
-                poly_delta_y = cfg.raster_height - top
+            if top + poly_delta_y >= self.cfg.raster_height:
+                poly_delta_y = self.cfg.raster_height - top
             if bottom + poly_delta_y < 0:
                 poly_delta_y = -bottom
 
@@ -161,12 +184,18 @@ class NestingEnvironment:
                        zip(self.current_polys, normalized_poly_actions)]
 
         self.draw_state()
+        self.current_steps += 1
+
+        done = self.overlapping_pixels_count == 0 or self.current_steps >= self.cfg.max_ep_steps
+        reward = 1 if self.overlapping_pixels_count == 0 else 0
+        info = {"correct_poly_position" : self.get_ideal_actions()}
+        return self.state, reward, done, info
 
     def draw_state(self):
 
-        bounds = [rasterio.features.bounds(poly) for poly in self.current_polys]
-        lower_left_bounds = [b[:2] for b in bounds]
-        top_right_bounds = [b[2:] for b in bounds]
+        self.bounds = [rasterio.features.bounds(poly) for poly in self.current_polys]
+        lower_left_bounds = [b[:2] for b in self.bounds]
+        top_right_bounds = [b[2:] for b in self.bounds]
         integer_lower_left_bounds = [[int(b[0]), int(b[1])] for b in lower_left_bounds]
         integer_top_right_bounds = [ [int(math.ceil(b[0])), int(math.ceil(b[1]))] for b in top_right_bounds]
         moved_top_right_bounds = [[tr[0] - ll[0], tr[1] - ll[1]] for tr,ll in zip(integer_top_right_bounds, integer_lower_left_bounds)]
@@ -176,19 +205,48 @@ class NestingEnvironment:
         moved_top_right_bounds = [l[::-1] for l in moved_top_right_bounds]
         integer_lower_left_bounds = [l[::-1] for l in integer_lower_left_bounds]
 
-        poly_rasters = [rasterio.features.rasterize([poly], out_shape=trb) for poly, trb in zip(moved_polys, moved_top_right_bounds)]
+        poly_rasters = [rasterio.features.rasterize([poly], out_shape=trb,) for poly, trb in zip(moved_polys, moved_top_right_bounds)]
+
 
         state = np.zeros((self.cfg.raster_width, self.cfg.raster_height))
-        for idx, (raster, coords) in enumerate(zip(poly_rasters, integer_lower_left_bounds)):
+        for idx, (raster, coords, poly_idx) in enumerate(zip(poly_rasters, integer_lower_left_bounds, self.poly_idxs.tolist())):
             raster_shape = raster.shape
             state[coords[0]: coords[0] + raster_shape[0], coords[1]: coords[1] + raster_shape[1]] =\
-                state[coords[0]: coords[0] + raster_shape[0], coords[1]: coords[1] + raster_shape[1]] + raster * (idx + 1)
+                state[coords[0]: coords[0] + raster_shape[0], coords[1]: coords[1] + raster_shape[1]] + raster * (poly_idx)
 
-        self.state = state
+        overlap_state = np.zeros_like(state)
+        for idx, (raster, coords) in enumerate(zip(poly_rasters, integer_lower_left_bounds)):
+            raster_shape = raster.shape
+            overlap_state[coords[0]: coords[0] + raster_shape[0], coords[1]: coords[1] + raster_shape[1]] =\
+                overlap_state[coords[0]: coords[0] + raster_shape[0], coords[1]: coords[1] + raster_shape[1]] + raster
+
+        self.overlapping_pixels_count = np.count_nonzero(overlap_state > 1)
+        overlap_state[overlap_state > 0] -= 1
+        stacked_state = np.stack([state, overlap_state], axis=0)
+
+        # self.state = state
+        self.state = {
+            "state" : stacked_state,
+            "bounds" : np.array(self.bounds),
+            # "rasters" : np.array(poly_rasters, dtype=object),
+            "poly_idxs" : np.array(self.poly_idxs),
+
+        }
+        # snapshot = tracemalloc.take_snapshot()
+        # top_stats = snapshot.statistics('lineno')
+
+        # print("[ Top 10 ]")
+        # for stat in top_stats[:10]:
+        #     print(stat)
+
+
 
         if self.cfg.show_state:
-            plt.imshow(self.state)
+            plt.imshow(self.state["state"])
             plt.show()
+
+        if self.cfg.save_state:
+            plt.imsave(os.path.join(self.save_dir, f"{str(self.current_steps)}.jpg"), self.state["state"])
 
 
     def build_state(self):
@@ -220,7 +278,7 @@ class NestingEnvironment:
 
         all_neighbours = np.array(all_neighbours)
         end = time.time()
-        print("Time consumed in computing neighbours: ", end - start)
+        # print("Time consumed in computing neighbours: ", end - start)
         vor.regions = new_regions
         final_regions = []
 
@@ -266,7 +324,7 @@ class NestingEnvironment:
             node_to_poly_idx[added_node] = node_to_poly_idx[n1] + node_to_poly_idx[n2]
 
         end = time.time()
-        print("Time consumed in merging nodes: ", end - start)
+        # print("Time consumed in merging nodes: ", end - start)
 
         # start = time.time()
         resulting_polys = []
@@ -291,7 +349,7 @@ class NestingEnvironment:
         self.current_polys = [
             affinity.scale(p, xfact=self.cfg.raster_width, yfact=self.cfg.raster_height, origin=(0, 0, 0)) for p in
             self.current_polys]
-
+        self.poly_idxs = np.random.permutation(len(self.current_polys)) + 1
         self.draw_state()
 
     def get_ideal_actions(self):
@@ -305,8 +363,8 @@ class NestingEnvironment:
 
 if __name__ == "__main__":
 
-    cfg = NestEnvConfig()
-    ne = NestingEnvironment(cfg)
+    ncfg = NestEnvConfig()
+    ne = NestingEnvironment(ncfg)
     for _ in range(20):
         state = ne.reset()
         for _ in range(4):
