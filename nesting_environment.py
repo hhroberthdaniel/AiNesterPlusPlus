@@ -88,15 +88,15 @@ class NestEnvConfig:
 
         self.poly_shrink_buffer_range = (0.0001, 0.001)
 
-        self.raster_width=200
-        self.raster_height=200
+        self.raster_width=100
+        self.raster_height=100
 
         self.show_state = False
         self.save_state = False
         self.save_dir = "./nesting_states"
 
         # Overlap Parameters
-        self.move_piece_prob = 0.1
+        self.move_piece_prob = 0.05
 
 
 class NestingEnvironment:

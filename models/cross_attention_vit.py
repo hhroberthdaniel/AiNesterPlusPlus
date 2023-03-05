@@ -17,7 +17,7 @@ def default(val, d):
     return val if exists(val) else d
 
 def stable_softmax(t, dim = -1):
-    t = t - t.amax(dim = dim, keepdim = True)
+    t = t - t.argmax(dim = dim, keepdim = True)
     return t.softmax(dim = dim)
 # classes
 
@@ -101,6 +101,7 @@ class ViT(nn.Module):
         patch_dim = channels * patch_height * patch_width
         assert pool in {'cls', 'mean'}, 'pool type must be either cls (cls token) or mean (mean pooling)'
 
+        self.bn = nn.BatchNorm2d(num_features=channels)
         self.to_patch_embedding = nn.Sequential(
             Rearrange('b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1 = patch_height, p2 = patch_width),
             nn.LayerNorm(patch_dim),
@@ -123,6 +124,7 @@ class ViT(nn.Module):
         # )
 
     def forward(self, img):
+        img = self.bn(img)
         x = self.to_patch_embedding(img)
         b, n, _ = x.shape
 
@@ -260,9 +262,9 @@ class BidirectionalCrossAttention(nn.Module):
 
 
 class CrossAttentionVit(nn.Module):
-    def __init__(self, image_size=1000, patch_size=100, vit_dim=1024, vit_depth=6, vit_heads=16, vit_mlp_dim=2048, vit_channels=1,
-                 ca_heads=8, ca_dim_head=64, idxs_dim=1, idxs_out_dim=1024, ca_num_layers=3,
-                 poly_trans_dim=1024, poly_trans_depth=3, poly_trans_head=8, poly_trans_dim_head=64, poly_trans_mlp_dim=1024
+    def __init__(self, image_size=1000, patch_size=100, vit_dim=1024, vit_depth=3, vit_heads=16, vit_mlp_dim=2048, vit_channels=1,
+                 ca_heads=8, ca_dim_head=64, idxs_dim=1, idxs_out_dim=1024, ca_num_layers=2,
+                 poly_trans_dim=1024, poly_trans_depth=2, poly_trans_head=8, poly_trans_dim_head=64, poly_trans_mlp_dim=1024
                  , idxs_attention_num_layers=3):
         super().__init__()
         self.idxs_attention_num_layers = idxs_attention_num_layers

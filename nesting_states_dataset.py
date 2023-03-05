@@ -32,12 +32,15 @@ def prepare_sample(sample_data, max_grid_width, max_grid_height, max_num_of_poly
 
 
 class NestingStatesDataset(Dataset):
-    def __init__(self, data_dir, max_num_of_polys, max_grid_width, max_grid_height):
+    def __init__(self, data_dirs, max_num_of_polys, max_grid_width, max_grid_height):
         self.max_grid_height = max_grid_height
         self.max_grid_width = max_grid_width
         self.max_num_of_polys = max_num_of_polys
-        self.all_files = os.listdir(data_dir)
-        self.all_files = [os.path.join(data_dir, f) for f in self.all_files]
+        self.all_files = []
+        for dd in data_dirs:
+            dir_files = os.listdir(dd)
+            dir_files = [os.path.join(dd, f) for f in dir_files]
+            self.all_files.extend(dir_files)
 
     def __len__(self):
         return len(self.all_files)
